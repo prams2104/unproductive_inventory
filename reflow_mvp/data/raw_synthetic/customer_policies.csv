@@ -1,0 +1,6 @@
+customer_id,customer_name,required_rsl_pct,transit_lead_time_days
+CUST-001,UNFI,0.75,5
+CUST-002,Walmart,0.6,7
+CUST-003,Discount_Partner,0.1,4
+CUST-004,"Rodriguez, Figueroa and Sanchez",0.65,8
+CUST-005,Doyle Ltd,0.7,5
