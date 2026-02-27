@@ -146,29 +146,51 @@ def flag_risk_and_exposure(
     return df
 
 
+def compute_at_risk_ledger(
+    sku_master: pd.DataFrame,
+    customer_policies: pd.DataFrame,
+    lot_ledger: pd.DataFrame,
+    current_date: datetime | None = None,
+) -> pd.DataFrame:
+    """
+    Run the full At-Risk Engine pipeline on DataFrames (no disk I/O).
+
+    Use this for uploaded data in the Streamlit app or programmatic calls.
+
+    Args:
+        sku_master: Columns: sku_id, category, unit_cost, standard_shelf_life_days.
+        customer_policies: Columns: customer_id, customer_name, required_rsl_pct,
+            transit_lead_time_days.
+        lot_ledger: Columns: lot_id, sku_id, location_id, qty_on_hand,
+            production_date, expiry_date. Dates must be parseable.
+        current_date: "Today" for RSL. If None, uses max(production_date) + 30.
+
+    Returns:
+        Enriched DataFrame with total_lot_value, actual_days_remaining,
+        eligible_* columns, is_at_risk, financial_risk_exposure.
+    """
+    lot_ledger = lot_ledger.copy()
+    lot_ledger["production_date"] = pd.to_datetime(lot_ledger["production_date"])
+    lot_ledger["expiry_date"] = pd.to_datetime(lot_ledger["expiry_date"])
+
+    if current_date is None:
+        current_date = compute_current_date(lot_ledger)
+
+    df = merge_and_enrich(lot_ledger, sku_master, current_date)
+    df = apply_shelf_life_gatekeeper(df, customer_policies)
+    df = flag_risk_and_exposure(df, customer_policies)
+    return df
+
+
 def main() -> None:
     """Build the At-Risk Ledger and save to data/processed/."""
     print("ReFlow AI — At-Risk Engine (Phase 2)")
     print("=" * 50)
 
-    # 1. Ingest
     sku_master, customer_policies, lot_ledger = ingest_data()
     print(f"Ingested: {len(lot_ledger)} lots, {len(sku_master)} SKUs, {len(customer_policies)} customers")
 
-    current_date = compute_current_date(lot_ledger)
-    print(f"Evaluation date: {current_date.date()}")
-    print()
-
-    # 2. Merge & Enrich
-    df = merge_and_enrich(lot_ledger, sku_master, current_date)
-    print("Merged lot_ledger with sku_master; computed Total_Lot_Value, Actual_Days_Remaining")
-
-    # 3. Shelf-Life Gatekeeper
-    df = apply_shelf_life_gatekeeper(df, customer_policies)
-    print("Applied Shelf-Life Gatekeeper (eligibility per customer)")
-
-    # 4. Risk Flagging
-    df = flag_risk_and_exposure(df, customer_policies)
+    df = compute_at_risk_ledger(sku_master, customer_policies, lot_ledger)
     print("Flagged at-risk lots and Financial_Risk_Exposure")
     print()
 

@@ -46,7 +46,7 @@ We shift from **"predicting demand"** to **"managing risk"**:
 |-------|-------------|-------------|
 | **Phase 1** | Stochastic Data Generation | Bias-free synthetic data using Gaussian (production dates) and Poisson (demand) distributions. No hardcoded at-risk lots—failures emerge from statistical tails. Target: 1.5–3% organic failure rate (FMCG benchmark). |
 | **Phase 2** | At-Risk Engine | Shelf-Life Gatekeeper logic: RSL at receipt = (days_remaining - transit) / shelf_life. Flags lots ineligible for strictest customer but still sellable elsewhere. Outputs financial risk exposure. |
-| **Phase 3** | Action Inbox | Streamlit UI: at-risk lot grid, KPI metrics, human-in-the-loop action simulator (Reroute / Liquidate / Reject). Audit trail for every action. |
+| **Phase 3** | Action Inbox | Streamlit UI: at-risk lot grid, KPI metrics, human-in-the-loop action simulator. **Run on Your Data** tab: upload CSV exports and run the risk engine on your own inventory. |
 | **Phase 4** | Monte Carlo Validation | 100 stochastic warehouse scenarios. Compares Baseline (100% write-off) vs ReFlow (60% recovery via reroute). Proves ROI is not hardcoded. Results visualized in Action Inbox Tab 2. |
 
 ---
@@ -103,6 +103,22 @@ streamlit run app.py
 ```
 
 Open **http://localhost:8501** in your browser.
+
+---
+
+## Run on Your Data (CSV Upload)
+
+You can run the risk engine on **your own data** without generating synthetic data:
+
+1. Launch the app: `streamlit run app.py`
+2. Open the **"Run on Your Data"** tab
+3. Upload two required CSVs:
+   - **SKU Master**: `sku_id`, `category`, `unit_cost`, `standard_shelf_life_days`
+   - **Lot Ledger** (Inventory Aging Report): `lot_id`, `sku_id`, `location_id`, `qty_on_hand`, `production_date`, `expiry_date`
+4. Optionally upload **Customer Policies**; if omitted, defaults (UNFI 75%, Walmart 60%, Discount Partner 10%) are used
+5. Download CSV templates from the expander if your column names differ
+
+**Use case**: During pilot discovery, ask prospects to export their Inventory Aging Report. Upload it to show them at-risk lots and financial exposure—no ERP integration required.
 
 ---
 
