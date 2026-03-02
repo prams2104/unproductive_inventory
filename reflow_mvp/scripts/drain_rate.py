@@ -77,7 +77,11 @@ def compute_drain_rate(
 
     days_already_held = (today - production).days
     days_to_expiry = max(0, (expiry - today).days)
-    cumulative_drain = drain_rate_daily * max(0, days_already_held)
+    # Cumulative drain: the lot spent most of its hold at risk_multiplier=1.0 (no urgency).
+    # Using the current escalated rate for the full hold period would overstate historical cost.
+    # We apply the base rate (multiplier=1.0) for the hold period instead.
+    base_drain_daily = capital_cost_daily + storage_cost_daily
+    cumulative_drain = base_drain_daily * max(0, days_already_held)
     projected_total_drain = drain_rate_daily * days_to_expiry if days_to_expiry > 0 else 0.0
 
     # Break-even: days until cumulative drain exceeds salvage (assume 30% salvage)

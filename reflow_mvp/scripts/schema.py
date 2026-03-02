@@ -72,8 +72,13 @@ class ValidationResult:
 
 
 def _to_datetime_safe(series: pd.Series) -> pd.Series:
-    """Parse datetime column; invalid values become NaT."""
-    return pd.to_datetime(series, errors="coerce")
+    """Parse datetime column; invalid values become NaT.
+
+    Uses format='mixed' so a column containing multiple date formats (e.g.
+    '2025-01-15', '01/15/2025', '15-Jan-2025') does not coerce all rows to NaT
+    after latching onto the first row's format — a real ERP export failure mode.
+    """
+    return pd.to_datetime(series, format="mixed", dayfirst=False, errors="coerce")
 
 
 def validate_dataframe(

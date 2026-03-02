@@ -45,7 +45,12 @@ except ImportError:
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 RAW_DATA_DIR = PROJECT_ROOT / "data" / "raw_synthetic"
 
-# Evaluation anchor: "today" for RSL calculations
+# Evaluation anchor: "today" for RSL calculations at generation time.
+# NOTE: compute_organic_failure_rate() measures the failure rate AT this date (~1.5–3%).
+# build_risk_engine.compute_current_date() evaluates at max(production_date) + 30 days,
+# which is ~30 days AFTER REFERENCE_DATE. This intentional offset simulates "the next
+# replenishment review cycle" and will flag significantly more lots as at-risk (typically
+# 60–80%) — that's the operational reality, not a calibration error.
 REFERENCE_DATE = datetime(2025, 2, 26)
 
 # FMCG benchmark: organic failure rate (at-risk + expired) as % of inventory value
@@ -304,7 +309,6 @@ def generate_edi_852_feed(
 def generate_all(
     seed: int | None = 42,
     reference_date: datetime | None = None,
-    output_dir: Path | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """
     Generate full dataset in memory (no CSV writes). Monte Carlo–ready.
@@ -361,7 +365,9 @@ def compute_organic_failure_rate(
     df["expiry_date"] = pd.to_datetime(df["expiry_date"])
     df["production_date"] = pd.to_datetime(df["production_date"])
     df["actual_days_remaining"] = (df["expiry_date"] - pd.Timestamp(reference_date)).dt.days
-    df["rsl"] = df["actual_days_remaining"] / (df["expiry_date"] - df["production_date"]).dt.days
+    # Use standard_shelf_life_days from SKU master — matches production path in build_risk_engine.py.
+    # Dividing by (expiry - production).days would diverge for lots with manual expiry overrides.
+    df["rsl"] = df["actual_days_remaining"] / df["standard_shelf_life_days"]
     at_risk = (df["rsl"] < strictest_rsl) & (df["actual_days_remaining"] > 0)
     expired = df["actual_days_remaining"] <= 0
     failed_value = df.loc[at_risk | expired, "total_lot_value"].sum()
@@ -382,7 +388,7 @@ def main() -> None:
     sku_master, customer_policies, lot_ledger, edi_852 = generate_all(seed=args.seed)
 
     # Report organic failure rate (no forced at-risk)
-    failure_rate, n_at_risk, total_val = compute_organic_failure_rate(
+    failure_rate, n_at_risk, _ = compute_organic_failure_rate(
         lot_ledger, sku_master, REFERENCE_DATE
     )
     failure_rate_decimal = failure_rate / 100.0

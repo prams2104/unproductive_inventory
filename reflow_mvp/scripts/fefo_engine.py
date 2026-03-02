@@ -25,11 +25,6 @@ RECOVERY_RATE_DISCOUNT = 0.50  # Discount partner: 40-60%
 RECOVERY_RATE_B2B = 0.22      # B2B liquidation: 15-30%
 
 
-def _sanitize_customer_name(name: str) -> str:
-    """Convert customer_name to column-safe form (e.g., for eligible_* columns)."""
-    return str(name).replace(",", "").replace(" ", "_").lower()
-
-
 def build_eligibility_matrix(
     enriched_ledger: pd.DataFrame,
     customer_policies: pd.DataFrame,
@@ -129,17 +124,26 @@ def recommend_reroutes(
     """
     strictest = customer_policies.loc[customer_policies["required_rsl_pct"].idxmax()]
     strictest_name = strictest["customer_name"]
+    strictest_required_rsl = float(strictest["required_rsl_pct"])
+    strictest_transit = int(strictest["transit_lead_time_days"])
 
     at_risk_lots = enriched_ledger[enriched_ledger["is_at_risk"] == True]
     if at_risk_lots.empty:
         return []
 
     lot_value = dict(zip(enriched_ledger["lot_id"], enriched_ledger["total_lot_value"]))
+    lot_days_remaining = dict(zip(enriched_ledger["lot_id"], enriched_ledger["actual_days_remaining"]))
+    lot_shelf_life = dict(zip(enriched_ledger["lot_id"], enriched_ledger["standard_shelf_life_days"]))
     recommendations: list[RerouteRecommendation] = []
 
     for lot_id in at_risk_lots["lot_id"].unique():
         lot_val = lot_value.get(lot_id, 0.0)
+        days_remaining = lot_days_remaining.get(lot_id, 0)
+        shelf_life = lot_shelf_life.get(lot_id, 1)
         em_lot = eligibility_matrix[eligibility_matrix["lot_id"] == lot_id]
+
+        # RSL at the strictest customer's dock — used in the rejection reason string
+        rsl_at_strictest = (days_remaining - strictest_transit) / shelf_life if shelf_life > 0 else 0.0
 
         eligible = em_lot[em_lot["is_eligible"] == True]
         if eligible.empty:
@@ -181,10 +185,11 @@ def recommend_reroutes(
             confidence = "LOW"
 
         headroom_pct = headroom * 100
-        rsl_pct = rsl * 100
+        # Use rsl_at_strictest for the rejection clause, rsl (at recommended customer) for the eligible clause
         reason = (
-            f"Lot {lot_id} fails {strictest_name} (RSL {rsl_pct:.1f}% < 75% required). "
-            f"Eligible for {rec_cust} (RSL {rsl_pct:.1f}% >= required, headroom {headroom_pct:.1f}%). "
+            f"Lot {lot_id} fails {strictest_name} "
+            f"(RSL at dock {rsl_at_strictest * 100:.1f}% < {strictest_required_rsl * 100:.0f}% required). "
+            f"Eligible for {rec_cust} (RSL {rsl * 100:.1f}% >= required, headroom {headroom_pct:.1f}%). "
             f"Estimated recovery: ${rec_val:,.2f}."
         )
 
