@@ -21,7 +21,7 @@ import streamlit as st
 
 # Allow importing from scripts/
 sys.path.insert(0, str(Path(__file__).parent / "scripts"))
-from build_risk_engine import compute_at_risk_ledger
+from build_risk_engine import build_comprehensive_ledger, compute_at_risk_ledger
 
 # ---------------------------------------------------------------------------
 # PAGE CONFIG (must be first Streamlit command)
@@ -37,6 +37,7 @@ st.set_page_config(
 # ---------------------------------------------------------------------------
 PROJECT_ROOT = Path(__file__).resolve().parent
 LEDGER_PATH = PROJECT_ROOT / "data" / "processed" / "at_risk_ledger.csv"
+RECOMMENDATIONS_PATH = PROJECT_ROOT / "data" / "processed" / "reroute_recommendations.csv"
 AUDIT_LOG_PATH = PROJECT_ROOT / "data" / "processed" / "audit_log.csv"
 SIMULATION_PATH = PROJECT_ROOT / "data" / "processed" / "simulation_results.csv"
 
@@ -51,11 +52,17 @@ def load_at_risk_ledger():
     """
     if not LEDGER_PATH.exists():
         return None
-    import pandas as pd
     df = pd.read_csv(LEDGER_PATH)
-    # Filter to at-risk lots only
     df = df[df["is_at_risk"] == True].copy()
     return df
+
+
+@st.cache_data
+def load_reroute_recommendations():
+    """Load FEFO reroute recommendations. Returns DataFrame or None."""
+    if not RECOMMENDATIONS_PATH.exists():
+        return None
+    return pd.read_csv(RECOMMENDATIONS_PATH)
 
 
 @st.cache_data
@@ -95,10 +102,19 @@ def append_audit_log(lot_id: str, action: str, user: str = "Planner") -> None:
 # ---------------------------------------------------------------------------
 # TAB 1: LIVE ACTION INBOX
 # ---------------------------------------------------------------------------
+def _signal_indicator(tier: str) -> str:
+    """Return colored dot for signal confidence tier."""
+    if tier == "HIGH":
+        return "🟢"
+    if tier == "MEDIUM":
+        return "🟡"
+    return "🔴"
+
+
 def render_action_inbox_tab():
     """
-    Render Live Action Inbox: KPIs, at-risk lot grid, action simulator.
-    Reroute button only shown when lot is eligible for Discount Partner (RSL >= 10%).
+    Render Live Action Inbox: KPIs, at-risk lot grid (sorted by drain), action simulator.
+    Shows FEFO reroute recommendation per lot; Approve Recommended Action button.
     """
     df = load_at_risk_ledger()
     if df is None:
@@ -112,34 +128,57 @@ def render_action_inbox_tab():
         st.balloons()
         return
 
+    recs_df = load_reroute_recommendations()
+    rec_by_lot = {}
+    if recs_df is not None and not recs_df.empty:
+        for _, r in recs_df.iterrows():
+            rec_by_lot[r["lot_id"]] = r
+
     if "acted_lots" not in st.session_state:
         st.session_state.acted_lots = set()
 
     df_remaining = df[~df["lot_id"].isin(st.session_state.acted_lots)]
+    # Sort by drain rate (highest economic urgency first)
+    if "drain_rate_daily" in df_remaining.columns:
+        df_remaining = df_remaining.sort_values("drain_rate_daily", ascending=False)
     total_lots = len(df_remaining)
     total_exposure = df_remaining["financial_risk_exposure"].sum()
-    strictest_policy = "UNFI - 75% RSL"
+    total_drain = df_remaining["drain_rate_daily"].sum() if "drain_rate_daily" in df_remaining.columns else 0
+    total_recoverable = sum(
+        rec_by_lot.get(lid, {}).get("estimated_recovery_value", 0) or 0
+        for lid in df_remaining["lot_id"]
+    )
 
-    col1, col2, col3 = st.columns(3)
+    col1, col2, col3, col4 = st.columns(4)
     with col1:
         st.metric("Total Lots at Risk", f"{total_lots:,}")
     with col2:
         st.metric("Total Financial Risk Exposure", f"${total_exposure:,.2f}")
     with col3:
-        st.metric("Strictest Customer Policy", strictest_policy)
+        st.metric("Total Daily Capital Drain", f"${total_drain:,.2f}")
+    with col4:
+        st.metric("Total Recoverable Value", f"${total_recoverable:,.2f}")
 
     st.divider()
-    st.subheader("At-Risk Lot Ledger")
-    df_display = df_remaining
+    st.subheader("At-Risk Lot Ledger (sorted by economic urgency)")
     display_cols = ["lot_id", "sku_id", "location_id", "total_lot_value", "actual_days_remaining"]
-    display_cols = [c for c in display_cols if c in df_display.columns]
+    if "drain_rate_daily" in df_remaining.columns:
+        display_cols.extend(["drain_rate_daily", "projected_total_drain"])
+    if "confidence_tier" in df_remaining.columns:
+        display_cols.append("confidence_tier")
+    display_cols = [c for c in display_cols if c in df_remaining.columns]
+    df_display = df_remaining[display_cols].copy()
+    if "confidence_tier" in df_display.columns:
+        df_display["Signal"] = df_display["confidence_tier"].apply(_signal_indicator)
     st.dataframe(
-        df_display[display_cols].rename(columns={
+        df_display.rename(columns={
             "lot_id": "Lot ID",
             "sku_id": "SKU ID",
             "location_id": "Location ID",
             "total_lot_value": "Total Lot Value",
-            "actual_days_remaining": "Actual Days Remaining",
+            "actual_days_remaining": "Days Left",
+            "drain_rate_daily": "Daily Drain ($)",
+            "projected_total_drain": "Projected Drain ($)",
         }),
         use_container_width=True,
         hide_index=True,
@@ -163,20 +202,25 @@ def render_action_inbox_tab():
 
     if selected_lot:
         lot_row = df[df["lot_id"] == selected_lot].iloc[0]
-        eligible_discount = lot_row.get("eligible_discount_partner", False)
-        if isinstance(eligible_discount, str):
-            eligible_discount = eligible_discount.lower() in ("true", "1")
+        rec = rec_by_lot.get(selected_lot)
+
+        if rec is not None:
+            st.info(
+                f"**FEFO Recommendation:** {rec['recommended_customer']} | "
+                f"Recovery: ${rec['estimated_recovery_value']:,.2f} | Confidence: {rec['confidence']}"
+            )
+            st.caption(rec.get("reason", "")[:200] + ("..." if len(str(rec.get("reason", ""))) > 200 else ""))
 
         col1, col2, col3 = st.columns(3)
         with col1:
-            if eligible_discount:
+            if rec is not None and rec.get("recommended_customer") not in ("B2B_Liquidation",):
                 reroute_clicked = st.button(
-                    "🔄 Reroute to Discount_Partner",
+                    "✅ Approve Recommended Action",
                     use_container_width=True,
-                    help="Lot meets Discount Partner's 10% RSL minimum",
+                    help=f"Reroute to {rec.get('recommended_customer', 'recommended customer')}",
                 )
             else:
-                st.caption("Reroute: Not eligible (RSL below Discount Partner minimum)")
+                st.caption("No reroute recommendation (B2B liquidation only)")
                 reroute_clicked = False
         with col2:
             liquidate_clicked = st.button(
@@ -193,8 +237,8 @@ def render_action_inbox_tab():
 
         action_taken = reroute_clicked or liquidate_clicked or reject_clicked
         if action_taken:
-            if reroute_clicked:
-                action_label = "Reroute to Discount_Partner"
+            if reroute_clicked and rec is not None:
+                action_label = f"Approve Reroute to {rec['recommended_customer']}"
             elif liquidate_clicked:
                 action_label = "Trigger B2B Liquidation Listing"
             else:
@@ -211,8 +255,7 @@ def render_action_inbox_tab():
 # ---------------------------------------------------------------------------
 def render_roi_validation_tab():
     """
-    Render ROI Validation tab: metrics (avg/max capital recovered, % reduction),
-    bar chart of capital recovered by iteration, explanatory markdown.
+    Render ROI Validation tab: histogram, percentiles, scatter, mean recovery rate.
     """
     sim_df = load_simulation_results()
     if sim_df is None or sim_df.empty:
@@ -225,26 +268,40 @@ def render_roi_validation_tab():
     avg_capital = sim_df["capital_recovered"].mean()
     max_capital = sim_df["capital_recovered"].max()
     avg_pct_reduction = sim_df["pct_reduction_writeoffs"].mean()
+    p5 = sim_df["capital_recovered"].quantile(0.05)
+    p50 = sim_df["capital_recovered"].quantile(0.50)
+    p95 = sim_df["capital_recovered"].quantile(0.95)
+    avg_recovery_rate = (
+        sim_df["recovery_rate_mean"].mean() * 100
+        if "recovery_rate_mean" in sim_df.columns
+        else None
+    )
 
-    col1, col2, col3 = st.columns(3)
+    col1, col2, col3, col4 = st.columns(4)
     with col1:
         st.metric("Average Capital Recovered", f"${avg_capital:,.2f}")
     with col2:
-        st.metric("Maximum Capital Recovered", f"${max_capital:,.2f}")
+        st.metric("P5 / P50 / P95 Capital Recovered", f"${p5:,.0f} / ${p50:,.0f} / ${p95:,.0f}")
     with col3:
         st.metric("Average % Reduction in Write-offs", f"{avg_pct_reduction:.1f}%")
+    with col4:
+        if avg_recovery_rate is not None:
+            st.metric("Mean Recovery Rate (stochastic)", f"{avg_recovery_rate:.1f}%")
 
     st.divider()
-    st.subheader("Capital Recovered by Iteration")
-    chart_data = sim_df[["iteration_id", "capital_recovered"]].set_index("iteration_id")
-    st.bar_chart(chart_data)
+    st.subheader("Distribution of Capital Recovered")
+    st.bar_chart(sim_df[["iteration_id", "capital_recovered"]].set_index("iteration_id"))
+
+    if "n_at_risk_lots" in sim_df.columns:
+        st.subheader("At-Risk Lots vs Capital Recovered")
+        st.scatter_chart(sim_df, x="n_at_risk_lots", y="capital_recovered")
 
     st.divider()
     st.markdown(
         "**About this simulation**  \n\n"
-        "This simulation represents 100 stochastic supply chain environments, injecting random "
-        "transit delays and demand shocks. ReFlow AI consistently recovers capital by preemptively "
-        "routing inventory before it breaches strict retailer shelf-life thresholds."
+        "This simulation uses a **stochastic recovery model** (Beta distributions by channel and "
+        "days-to-expiry), not a hardcoded 60%. Recovery rate varies by iteration. "
+        "85% of reroute attempts succeed; 15% fail (truck unavailable, etc.)."
     )
 
 
@@ -297,14 +354,23 @@ DEFAULT_CUSTOMER_POLICIES = pd.DataFrame([
 # ---------------------------------------------------------------------------
 # TAB 3: RUN ON YOUR DATA
 # ---------------------------------------------------------------------------
+EDI_ALIASES = {
+    "date": ["date", "report_date", "transaction_date"],
+    "location_id": ["location_id", "location", "warehouse", "dc"],
+    "sku_id": ["sku_id", "sku", "item", "item id"],
+    "reported_qty_sold": ["reported_qty_sold", "qty_sold", "quantity", "units_sold"],
+}
+
+
 def render_upload_tab():
     """
-    Upload CSV exports and run the risk engine. Supports flexible column names.
+    Upload CSV exports and run the risk engine. Validation errors/warnings displayed.
+    Optional EDI 852 for signal integrity scoring.
     """
     st.subheader("Upload Your Data")
     st.markdown(
-        "Upload your **Inventory Aging Report** and related exports. ReFlow will run "
-        "the Shelf-Life Gatekeeper and show you at-risk lots and financial exposure. "
+        "Upload your **Inventory Aging Report** and related exports. ReFlow will validate "
+        "your data, run the Shelf-Life Gatekeeper, and show at-risk lots. "
         "Download templates below if your column names differ."
     )
 
@@ -318,6 +384,12 @@ def render_upload_tab():
         type=["csv"],
         key="upload_policy",
         help="If omitted, we use defaults: UNFI 75%, Walmart 60%, Discount Partner 10%.",
+    )
+    edi_file = st.file_uploader(
+        "EDI 852 Feed (optional)",
+        type=["csv"],
+        key="upload_edi",
+        help="For signal integrity scoring. Columns: date, location_id, sku_id, reported_qty_sold.",
     )
 
     st.divider()
@@ -378,33 +450,69 @@ def render_upload_tab():
         else:
             policy = DEFAULT_CUSTOMER_POLICIES
 
-        df = compute_at_risk_ledger(sku, policy, lot)
+        edi_852 = None
+        if edi_file:
+            edi_852 = pd.read_csv(edi_file)
+            edi_852 = _normalize_columns(edi_852, EDI_ALIASES)
+            if not all(c in edi_852.columns for c in ["date", "location_id", "sku_id", "reported_qty_sold"]):
+                st.warning("EDI 852 missing required columns. Skipping signal integrity.")
+                edi_852 = None
+
+        df, recommendations, val_result = build_comprehensive_ledger(
+            sku, policy, lot, edi_852=edi_852,
+        )
+
+        # Display validation errors (red) and warnings (yellow)
+        if val_result.errors:
+            st.error("**Validation Errors (processing halted):**")
+            for e in val_result.errors:
+                st.error(f"• {e.message}")
+            return
+        if val_result.warnings:
+            st.warning("**Validation Warnings (proceeding with cleaned data):**")
+            for w in val_result.warnings:
+                st.warning(f"• {w.message}")
+        if val_result.stats:
+            st.caption(f"Data quality: {val_result.stats}")
+
         df_at_risk = df[df["is_at_risk"] == True]
 
         st.success(f"Processed {len(lot)} lots.")
 
-        col1, col2, col3 = st.columns(3)
+        col1, col2, col3, col4 = st.columns(4)
         with col1:
             st.metric("Total Lots at Risk", f"{len(df_at_risk):,}")
         with col2:
             st.metric("Financial Risk Exposure", f"${df_at_risk['financial_risk_exposure'].sum():,.2f}")
         with col3:
             st.metric("Total Inventory Value", f"${df['total_lot_value'].sum():,.2f}")
+        with col4:
+            total_drain = df_at_risk["drain_rate_daily"].sum() if "drain_rate_daily" in df_at_risk.columns else 0
+            st.metric("Total Daily Drain", f"${total_drain:,.2f}")
 
         st.divider()
         st.subheader("At-Risk Lot Ledger")
         display_cols = ["lot_id", "sku_id", "location_id", "total_lot_value", "actual_days_remaining"]
+        if "drain_rate_daily" in df_at_risk.columns:
+            display_cols.extend(["drain_rate_daily", "projected_total_drain"])
+        if "confidence_tier" in df_at_risk.columns:
+            display_cols.append("confidence_tier")
         display_cols = [c for c in display_cols if c in df_at_risk.columns]
         if df_at_risk.empty:
             st.success("No lots at risk. All inventory meets customer shelf-life policies.")
         else:
+            df_display = df_at_risk[display_cols].copy()
+            if "confidence_tier" in df_display.columns:
+                df_display["Signal"] = df_display["confidence_tier"].apply(_signal_indicator)
             st.dataframe(
-                df_at_risk[display_cols].rename(columns={
+                df_display.rename(columns={
                     "lot_id": "Lot ID",
                     "sku_id": "SKU ID",
                     "location_id": "Location ID",
                     "total_lot_value": "Total Lot Value",
-                    "actual_days_remaining": "Actual Days Remaining",
+                    "actual_days_remaining": "Days Left",
+                    "drain_rate_daily": "Daily Drain ($)",
+                    "projected_total_drain": "Projected Drain ($)",
                 }),
                 use_container_width=True,
                 hide_index=True,

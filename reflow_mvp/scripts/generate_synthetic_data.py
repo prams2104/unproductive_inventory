@@ -324,6 +324,15 @@ def generate_all(
     lot_ledger = generate_lot_ledger(sku_master, ref, seed=seed)
     edi_852 = generate_edi_852_feed(sku_master, lot_ledger, ref, seed=seed)
 
+    # Assert synthetic data passes schema validation (pilot readiness)
+    from schema import validate_dataframe, validate_referential_integrity
+    assert validate_dataframe(sku_master, "sku_master").is_valid, "SKU Master must pass validation"
+    assert validate_dataframe(customer_policies, "customer_policies").is_valid, "Customer Policies must pass validation"
+    lot_res = validate_dataframe(lot_ledger, "lot_ledger")
+    assert lot_res.is_valid and lot_res.cleaned_df is not None, "Lot Ledger must pass validation"
+    ref_res = validate_referential_integrity(lot_res.cleaned_df, sku_master)
+    assert ref_res.cleaned_df is not None and len(ref_res.cleaned_df) > 0, "Referential integrity must hold"
+
     return sku_master, customer_policies, lot_ledger, edi_852
 
 

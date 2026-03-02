@@ -36,7 +36,7 @@ We shift from **"predicting demand"** to **"managing risk"**:
 
 - **Governed Action Inbox**: Every recommendation requires human approval. NIST AI RMF–aligned: auditable, traceable, no autonomous execution without explicit sign-off.
 
-- **Signal Integrity Scorer** (future): Scores EDI 852 feeds for reliability, filtering phantom demand spikes that drive overproduction.
+- **Signal Integrity Scorer**: Z-score anomaly detection on EDI 852 feeds; confidence tiers (HIGH/MEDIUM/LOW) flag phantom demand spikes.
 
 ---
 
@@ -44,22 +44,22 @@ We shift from **"predicting demand"** to **"managing risk"**:
 
 | Phase | Deliverable | Description |
 |-------|-------------|-------------|
-| **Phase 1** | Stochastic Data Generation | Bias-free synthetic data using Gaussian (production dates) and Poisson (demand) distributions. No hardcoded at-risk lots—failures emerge from statistical tails. Target: 1.5–3% organic failure rate (FMCG benchmark). |
-| **Phase 2** | At-Risk Engine | Shelf-Life Gatekeeper logic: RSL at receipt = (days_remaining - transit) / shelf_life. Flags lots ineligible for strictest customer but still sellable elsewhere. Outputs financial risk exposure. |
-| **Phase 3** | Action Inbox | Streamlit UI: at-risk lot grid, KPI metrics, human-in-the-loop action simulator. **Run on Your Data** tab: upload CSV exports and run the risk engine on your own inventory. |
-| **Phase 4** | Monte Carlo Validation | 100 stochastic warehouse scenarios. Compares Baseline (100% write-off) vs ReFlow (60% recovery via reroute). Proves ROI is not hardcoded. Results visualized in Action Inbox Tab 2. |
+| **Phase 1** | Stochastic Data Generation | Bias-free synthetic data using Gaussian (production dates) and Poisson (demand) distributions. No hardcoded at-risk lots—failures emerge from statistical tails. Target: 1.5–3% organic failure rate (FMCG benchmark). Schema validation assertion at end of `generate_all()`. |
+| **Phase 2** | At-Risk Engine | Shelf-Life Gatekeeper + FEFO Router + Drain Rate + Signal Integrity. Validates inputs (schema.py), builds eligibility matrix, recommends reroutes, computes daily economic drain. Outputs comprehensive ledger with drain_rate_daily, projected_total_drain, signal_confidence. |
+| **Phase 3** | Action Inbox | Streamlit UI: at-risk lot grid sorted by drain rate, FEFO reroute recommendations, "Approve Recommended Action" button, Total Daily Capital Drain KPI. **Run on Your Data** tab: validation errors/warnings, optional EDI 852 for signal scoring. |
+| **Phase 4** | Monte Carlo Validation | 100 stochastic warehouse scenarios. **Stochastic recovery model** (Beta by channel + days-to-expiry), 85% intervention success rate. P5/P50/P95 percentiles, scatter plot n_at_risk vs capital_recovered. Mean recovery rate varies by iteration. |
 
 ---
 
 ## Mathematical Validation
 
-The Monte Carlo backtest runs **100 distinct warehouse states** (different seeds → different transit delays, demand shocks, lot ages). Results:
+The Monte Carlo backtest runs **100 distinct warehouse states** (different seeds → different transit delays, demand shocks, lot ages). Uses a **stochastic recovery model** (Beta distributions by channel and days-to-expiry; 85% intervention success rate)—not a hardcoded 60%. Results:
 
-- **~60% reduction in write-offs** when ReFlow intervenes (reroute to Discount Partner or B2B liquidation)
-- **Average Capital Recovered**: ~$370K per 200-lot warehouse (varies by run)
-- **Maximum Capital Recovered**: ~$550K in high-risk scenarios
+- **~50–60% mean recovery rate** (varies by iteration; fire-sale lots get lower recovery)
+- **P5 / P50 / P95** percentiles of capital recovered
+- **Scatter plot**: n_at_risk_lots vs capital_recovered (relationship is not linear)
 
-This is **not a hardcoded demo**. The at-risk lots emerge organically from Gaussian/Poisson distributions. The ROI is the expected value across 100 stochastic iterations.
+This is **not a hardcoded demo**. At-risk lots emerge organically; recovery rates are sampled from industry-calibrated distributions.
 
 ---
 
@@ -84,7 +84,7 @@ source .venv/bin/activate  # On Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-**Dependencies**: `pandas`, `numpy`, `streamlit`, `faker`
+**Dependencies**: `pandas`, `numpy`, `streamlit`, `faker` (pure Python validation; no pandera/pydantic)
 
 ### Run the Pipeline
 
@@ -116,9 +116,12 @@ You can run the risk engine on **your own data** without generating synthetic da
    - **SKU Master**: `sku_id`, `category`, `unit_cost`, `standard_shelf_life_days`
    - **Lot Ledger** (Inventory Aging Report): `lot_id`, `sku_id`, `location_id`, `qty_on_hand`, `production_date`, `expiry_date`
 4. Optionally upload **Customer Policies**; if omitted, defaults (UNFI 75%, Walmart 60%, Discount Partner 10%) are used
-5. Download CSV templates from the expander if your column names differ
+5. Optionally upload **EDI 852** for signal integrity scoring (confidence tiers per location-SKU)
+6. Download CSV templates from the expander if your column names differ
 
-**Use case**: During pilot discovery, ask prospects to export their Inventory Aging Report. Upload it to show them at-risk lots and financial exposure—no ERP integration required.
+**Validation**: Red errors halt processing (missing columns, zero valid rows). Yellow warnings (nulls dropped, duplicates deduped, orphan SKUs) are logged; processing continues with cleaned data.
+
+**Use case**: During pilot discovery, ask prospects to export their Inventory Aging Report. Upload it to show them at-risk lots, drain rate, and FEFO reroute recommendations—no ERP integration required.
 
 ---
 
@@ -128,11 +131,15 @@ You can run the risk engine on **your own data** without generating synthetic da
 reflow_mvp/
 ├── data/
 │   ├── raw_synthetic/       # Phase 1 outputs (sku_master, customer_policies, lot_ledger, edi_852_feed)
-│   └── processed/          # Phase 2+ outputs (at_risk_ledger, audit_log, simulation_results)
+│   └── processed/           # Phase 2+ outputs (at_risk_ledger, reroute_recommendations, audit_log, simulation_results)
 ├── scripts/
+│   ├── schema.py                    # Schema validation (Task 1)
+│   ├── fefo_engine.py               # FEFO eligibility matrix + reroute recommender (Task 2)
+│   ├── drain_rate.py                # Daily economic drain calculator (Task 4)
+│   ├── signal_integrity.py          # EDI 852 z-score anomaly detection (Task 5)
 │   ├── generate_synthetic_data.py   # Phase 1: Stochastic data generation
-│   ├── build_risk_engine.py          # Phase 2: At-risk ledger
-│   └── run_simulation.py             # Phase 4: Monte Carlo backtest
+│   ├── build_risk_engine.py         # Phase 2: Orchestrates validation → FEFO → drain → signal
+│   └── run_simulation.py            # Phase 4: Monte Carlo with stochastic recovery
 ├── app.py                   # Phase 3: Streamlit Action Inbox
 ├── requirements.txt
 └── README.md
